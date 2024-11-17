@@ -622,7 +622,12 @@ def generate_samples(raw_data, batch_size):
 def generate_data(dataset, key):
     # load data
     if dataset in custom_datasets.DATASETS:
-        data = custom_datasets.load(dataset, cache_dir)
+        if dataset == 'raid':
+            data = custom_datasets.load(dataset, cache_dir, source=args.raid_source, attack=args.raid_attack)
+        elif dataset == 'csv':
+            data = custom_datasets.load(dataset, cache_dir, label=args.csv_label)
+        else:
+            data = custom_datasets.load(dataset, cache_dir)
     else:
         data = datasets.load_dataset(dataset, split='train', cache_dir=cache_dir)[key]
 
@@ -747,6 +752,9 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default="xsum")
+    parser.add_argument('--raid_attack', type=str, default="none")
+    parser.add_argument('--raid_source', type=str, default="machine")
+    parser.add_argument('--csv_label', type=str, default="MGT")
     parser.add_argument('--dataset_key', type=str, default="document")
     parser.add_argument('--pct_words_masked', type=float, default=0.3) # pct masked is actually pct_words_masked * (span_length / (span_length + 2 * buffer_size))
     parser.add_argument('--span_length', type=int, default=2)

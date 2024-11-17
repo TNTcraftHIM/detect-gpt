@@ -1,0 +1,8 @@
+results
+tmp_results
+cache
+~
+.idea
+__pycache__
+data/*
+!data/put_RAID_and_or_csv_data_here
