@@ -619,13 +619,45 @@ def generate_samples(raw_data, batch_size):
     return data
 
 
+def generate_samples_csv(raw_data_original, raw_data_sampled, batch_size):
+    torch.manual_seed(42)
+    np.random.seed(42)
+    data = {
+        "original": [],
+        "sampled": [],
+    }
+
+    for batch in range(len(raw_data_original) // batch_size):
+        print('Generating samples for batch', batch, 'of', len(raw_data_original) // batch_size)
+        original_text = raw_data_original[batch * batch_size:(batch + 1) * batch_size]
+        sampled_text = raw_data_sampled[batch * batch_size:(batch + 1) * batch_size]
+
+        for o, s in zip(original_text, sampled_text):
+
+            o, s = trim_to_shorter_length(o, s)
+
+            # add to the data
+            data["original"].append(o)
+            data["sampled"].append(s)
+
+    if args.pre_perturb_pct > 0:
+        print(f'APPLYING {args.pre_perturb_pct}, {args.pre_perturb_span_length} PRE-PERTURBATIONS')
+        load_mask_model()
+        data["sampled"] = perturb_texts(data["sampled"], args.pre_perturb_span_length, args.pre_perturb_pct,
+                                        ceil_pct=True)
+        load_base_model()
+
+    return data
+
+
 def generate_data(dataset, key):
     # load data
     if dataset in custom_datasets.DATASETS:
         if dataset == 'raid':
             data = custom_datasets.load(dataset, cache_dir, source=args.raid_source, attack=args.raid_attack)
         elif dataset == 'csv':
-            data = custom_datasets.load(dataset, cache_dir, label=args.csv_label)
+            data = custom_datasets.load(dataset, cache_dir, label="HWT")
+            data_sampled = custom_datasets.load(dataset, cache_dir, label="MGT")
         else:
             data = custom_datasets.load(dataset, cache_dir)
     else:
@@ -638,12 +670,18 @@ def generate_data(dataset, key):
 
     # remove duplicates from the data
     data = list(dict.fromkeys(data))  # deterministic, as opposed to set()
+    if dataset == 'csv':
+        data_sampled = list(dict.fromkeys(data_sampled))
 
     # strip whitespace around each example
     data = [x.strip() for x in data]
+    if dataset == 'csv':
+        data_sampled = [x.strip() for x in data_sampled]
 
     # remove newlines from each example
     data = [strip_newlines(x) for x in data]
+    if dataset == 'csv':
+        data_sampled = [strip_newlines(x) for x in data_sampled]
 
     # try to keep only examples with > 250 words
     if dataset in ['writing', 'squad', 'xsum']:
@@ -653,19 +691,32 @@ def generate_data(dataset, key):
 
     random.seed(0)
     random.shuffle(data)
+    if dataset == 'csv':
+        random.shuffle(data_sampled)
 
     data = data[:5_000]
+    if dataset == 'csv':
+        data_sampled = data_sampled[:5_000]
 
     # keep only examples with <= 512 tokens according to mask_tokenizer
     # this step has the extra effect of removing examples with low-quality/garbage content
     tokenized_data = preproc_tokenizer(data)
     data = [x for x, y in zip(data, tokenized_data["input_ids"]) if len(y) <= 512]
+    if dataset == 'csv':
+        tokenized_data_sampled = preproc_tokenizer(data_sampled)
+        data_sampled = [x for x, y in zip(data_sampled, tokenized_data_sampled["input_ids"]) if len(y) <= 512]
 
     # print stats about remainining data
     print(f"Total number of samples: {len(data)}")
     print(f"Average number of words: {np.mean([len(x.split()) for x in data])}")
+    if dataset == 'csv':
+        print(f"Total number of samples (sampled): {len(data_sampled)}")
+        print(f"Average number of words (sampled): {np.mean([len(x.split()) for x in data_sampled])}")
 
-    return generate_samples(data[:n_samples], batch_size=batch_size)
+    if dataset == 'csv':
+        return generate_samples_csv(data[:n_samples], data_sampled[:n_samples], batch_size=batch_size)
+    else:
+        return generate_samples(data[:n_samples], batch_size=batch_size)
 
 
 def load_base_model_and_tokenizer(name):
@@ -754,7 +805,6 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default="xsum")
     parser.add_argument('--raid_attack', type=str, default="none")
     parser.add_argument('--raid_source', type=str, default="machine")
-    parser.add_argument('--csv_label', type=str, default="MGT")
     parser.add_argument('--dataset_key', type=str, default="document")
     parser.add_argument('--pct_words_masked', type=float, default=0.3) # pct masked is actually pct_words_masked * (span_length / (span_length + 2 * buffer_size))
     parser.add_argument('--span_length', type=int, default=2)
