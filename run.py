@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import tqdm
 import random
-from sklearn.metrics import roc_curve, precision_recall_curve, auc
+from sklearn.metrics import roc_curve, precision_recall_curve, auc, roc_auc_score
 import argparse
 import datetime
 import os
@@ -464,54 +464,197 @@ def get_perturbation_results(span_length=10, n_perturbations=1, n_samples=500):
 
     return results
 
+def get_perturbation_results_csv(span_length=10, n_perturbations=1, n_samples=500):
+    load_mask_model()
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+
+    results = []
+    original_text = data["original"]
+    sampled_text = data["sampled"]
+
+    for idx in range(len(original_text)):
+        results.append({
+            "original": original_text[idx],
+            "sampled": sampled_text[idx],
+            "perturbed_sampled": sampled_text[idx],
+            "perturbed_original": original_text[idx]
+        })
+
+    load_base_model()
+
+    for res in tqdm.tqdm(results, desc="Computing log likelihoods"):
+        res["original_ll"] = get_ll(res["original"])
+        res["sampled_ll"] = get_ll(res["sampled"])
+        res["all_perturbed_sampled_ll"] = [get_ll(res["sampled"])]  # 使用原始 sampled 直接计算
+        res["all_perturbed_original_ll"] = [get_ll(res["original"])]  # 使用原始 original 直接计算
+        res["perturbed_sampled_ll"] = res["sampled_ll"]  # 和 sampled_ll 相同
+        res["perturbed_original_ll"] = res["original_ll"]  # 和 original_ll 相同
+        res["perturbed_sampled_ll_std"] = 0  # 无 perturbation，标准差为 0
+        res["perturbed_original_ll_std"] = 0  # 无 perturbation，标准差为 0
+
+    return results
+
+
+def process_p_values_and_labels_odd(answer_labels, results_list):
+    # 计算 AUROC
+    auroc = roc_auc_score(answer_labels, results_list)
+    fpr, tpr, thresholds = roc_curve(answer_labels, results_list)
+    accs = {th: tpr[np.argwhere(fpr <= th).max()] for th in [0.01, 0.05, 0.1]}
+    print("auroc: {:.4f}; ".format(auroc) + "; ".join(
+        ["TPR: {:.4f} @ FPR={:.4f}".format(v, k) for k, v in accs.items()]))
+
+    return auroc
+
+
+def process_p_values_and_labels(answer_labels, results_list):
+    # 初始化 AUROC 列表
+    auroc_list = []
+
+    # 确保标签和结果列表长度匹配
+    assert len(answer_labels) == len(results_list)
+
+    # 用于记录已配对的索引
+    used_indices = set()
+
+    # 处理每对标签
+    for i in range(len(answer_labels)):
+        if i in used_indices:
+            continue
+
+        # 当前标签
+        current_label = answer_labels[i]
+
+        # 找到下一个未使用的相反标签的索引
+        for j in range(len(answer_labels)):
+            if answer_labels[j] != current_label and j not in used_indices:
+                # 获取当前对的 p 值
+                p_values_0 = [results_list[i] if current_label == 0 else results_list[j]]
+                p_values_1 = [results_list[j] if current_label == 0 else results_list[i]]
+
+                # 合并 p 值和标签
+                combined_p_values = p_values_0 + p_values_1
+                combined_labels = [0] * len(p_values_0) + [1] * len(p_values_1)
+
+                # 计算 AUROC
+                auroc = round(roc_auc_score(combined_labels, combined_p_values), 6)
+                fpr, tpr, thresholds = roc_curve(combined_labels, combined_p_values)
+                accs = {th: tpr[np.argwhere(fpr <= th).max()] for th in [0.01, 0.05, 0.1]}
+                auroc_list.append(auroc)
+                # print("auroc: {:.4f}; ".format(auroc) + "; ".join(
+                #     ["TPR: {:.4f} @ FPR={:.4f}".format(v, k) for k, v in accs.items()]))
+
+                # 标记已使用的索引
+                used_indices.update([i, j])
+                break
+
+    return auroc_list
+
 
 def run_perturbation_experiment(results, criterion, span_length=10, n_perturbations=1, n_samples=500):
     # compute diffs with perturbed
     predictions = {'real': [], 'samples': []}
     for res in results:
         if criterion == 'd':
-            predictions['real'].append(res['original_ll'] - res['perturbed_original_ll'])
-            predictions['samples'].append(res['sampled_ll'] - res['perturbed_sampled_ll'])
+            if args.dataset != 'csv':
+                predictions['real'].append(res['original_ll'] - res['perturbed_original_ll'])
+                predictions['samples'].append(res['sampled_ll'] - res['perturbed_sampled_ll'])
+            else:
+                predictions['real'].append(res['original_ll'])
+                predictions['samples'].append(res['sampled_ll'])
         elif criterion == 'z':
             if res['perturbed_original_ll_std'] == 0:
                 res['perturbed_original_ll_std'] = 1
-                print("WARNING: std of perturbed original is 0, setting to 1")
-                print(f"Number of unique perturbed original texts: {len(set(res['perturbed_original']))}")
-                print(f"Original text: {res['original']}")
+                if args.dataset != 'csv':
+                    print("WARNING: std of perturbed original is 0, setting to 1")
+                    print(f"Number of unique perturbed original texts: {len(set(res['perturbed_original']))}")
+                    print(f"Original text: {res['original']}")
             if res['perturbed_sampled_ll_std'] == 0:
                 res['perturbed_sampled_ll_std'] = 1
-                print("WARNING: std of perturbed sampled is 0, setting to 1")
-                print(f"Number of unique perturbed sampled texts: {len(set(res['perturbed_sampled']))}")
-                print(f"Sampled text: {res['sampled']}")
-            predictions['real'].append((res['original_ll'] - res['perturbed_original_ll']) / res['perturbed_original_ll_std'])
-            predictions['samples'].append((res['sampled_ll'] - res['perturbed_sampled_ll']) / res['perturbed_sampled_ll_std'])
+                if args.dataset != 'csv':
+                    print("WARNING: std of perturbed sampled is 0, setting to 1")
+                    print(f"Number of unique perturbed sampled texts: {len(set(res['perturbed_sampled']))}")
+                    print(f"Sampled text: {res['sampled']}")
+            if args.dataset != 'csv':
+                predictions['real'].append((res['original_ll'] - res['perturbed_original_ll']) / res['perturbed_original_ll_std'])
+                predictions['samples'].append((res['sampled_ll'] - res['perturbed_sampled_ll']) / res['perturbed_sampled_ll_std'])
+            else:
+                predictions['real'].append((res['original_ll']))
+                predictions['samples'].append((res['sampled_ll']))
 
-    fpr, tpr, roc_auc = get_roc_metrics(predictions['real'], predictions['samples'])
-    p, r, pr_auc = get_precision_recall_metrics(predictions['real'], predictions['samples'])
-    name = f'perturbation_{n_perturbations}_{criterion}'
-    print(f"{name} ROC AUC: {roc_auc}, PR AUC: {pr_auc}")
-    return {
-        'name': name,
-        'predictions': predictions,
-        'info': {
-            'pct_words_masked': args.pct_words_masked,
-            'span_length': span_length,
-            'n_perturbations': n_perturbations,
-            'n_samples': n_samples,
-        },
-        'raw_results': results,
-        'metrics': {
-            'roc_auc': roc_auc,
-            'fpr': fpr,
-            'tpr': tpr,
-        },
-        'pr_metrics': {
-            'pr_auc': pr_auc,
-            'precision': p,
-            'recall': r,
-        },
-        'loss': 1 - pr_auc,
-    }
+    if args.dataset != 'csv':
+        fpr, tpr, roc_auc = get_roc_metrics(predictions['real'], predictions['samples'])
+        p, r, pr_auc = get_precision_recall_metrics(predictions['real'], predictions['samples'])
+        name = f'perturbation_{n_perturbations}_{criterion}'
+        print(f"{name} ROC AUC: {roc_auc}, PR AUC: {pr_auc}")
+        return {
+            'name': name,
+            'predictions': predictions,
+            'info': {
+                'pct_words_masked': args.pct_words_masked,
+                'span_length': span_length,
+                'n_perturbations': n_perturbations,
+                'n_samples': n_samples,
+            },
+            'raw_results': results,
+            'metrics': {
+                'roc_auc': roc_auc,
+                'fpr': fpr,
+                'tpr': tpr,
+            },
+            'pr_metrics': {
+                'pr_auc': pr_auc,
+                'precision': p,
+                'recall': r,
+            },
+            'loss': 1 - pr_auc,
+        }
+    else:
+        global csv
+        answer_labels = csv['label'].tolist()
+        answer_labels = [0 if x == 'HWT' else 1 for x in answer_labels]
+        predictions_combined = []
+        answer_labels_temp = answer_labels.copy()
+        for answer in answer_labels_temp:
+            if answer == 0:
+                try:
+                    predictions_combined.append(predictions['real'].pop(0))
+                except IndexError:
+                    # if there are no more real predictions, remove it from answer_labels
+                    answer_labels.remove(answer)
+            else:
+                try:
+                    predictions_combined.append(predictions['samples'].pop(0))
+                except IndexError:
+                    # if there are no more sample predictions, remove it from answer_labels
+                    answer_labels.remove(answer)
+        # calculate the AUROC
+        auroc_list = process_p_values_and_labels(answer_labels, predictions_combined)
+        all_auroc = process_p_values_and_labels_odd(answer_labels, predictions_combined)
+        print("avg_auroc: {:.4f}".format(sum(auroc_list) / len(auroc_list))
+              + "; ".join(["std_auroc: {:.4f}".format(np.std(auroc_list))]))
+        print("all_auroc: ", all_auroc)
+        name = f'perturbation_{n_perturbations}_{criterion}'
+        print(f"{name} AUROC: {auroc_list}")
+        return {
+            'name': name,
+            'predictions': predictions,
+            'info': {
+                'pct_words_masked': args.pct_words_masked,
+                'span_length': span_length,
+                'n_perturbations': n_perturbations,
+                'n_samples': n_samples,
+            },
+            'raw_results': results,
+            'metrics': {
+                'avg_auroc': sum(auroc_list) / len(auroc_list),
+                'std_auroc': np.std(auroc_list),
+                'all_auroc': all_auroc,
+                "auroc_list": auroc_list
+            },
+            'loss': 1 - sum(auroc_list) / len(auroc_list),
+        }
 
 
 def run_baseline_threshold_experiment(criterion_fn, name, n_samples=500):
@@ -650,14 +793,17 @@ def generate_samples_csv(raw_data_original, raw_data_sampled, batch_size):
     return data
 
 
+csv = None
 def generate_data(dataset, key):
     # load data
     if dataset in custom_datasets.DATASETS:
         if dataset == 'raid':
             data = custom_datasets.load(dataset, cache_dir, source=args.raid_source, attack=args.raid_attack)
         elif dataset == 'csv':
-            data = custom_datasets.load(dataset, cache_dir, label="HWT")
-            data_sampled = custom_datasets.load(dataset, cache_dir, label="MGT")
+            global csv
+            csv = custom_datasets.load(dataset, cache_dir)
+            data = csv[csv['label'] == "HWT"]['text'].tolist()
+            data_sampled = csv[csv['label'] == "MGT"]['text'].tolist()
         else:
             data = custom_datasets.load(dataset, cache_dir)
     else:
@@ -948,7 +1094,10 @@ if __name__ == '__main__':
     if not args.baselines_only:
         # run perturbation experiments
         for n_perturbations in n_perturbation_list:
-            perturbation_results = get_perturbation_results(args.span_length, n_perturbations, n_samples)
+            if args.dataset in ['csv']:
+                perturbation_results = get_perturbation_results_csv(args.span_length, n_perturbations, n_samples)
+            else:
+                perturbation_results = get_perturbation_results(args.span_length, n_perturbations, n_samples)
             for perturbation_mode in ['d', 'z']:
                 output = run_perturbation_experiment(
                     perturbation_results, perturbation_mode, span_length=args.span_length, n_perturbations=n_perturbations, n_samples=n_samples)
@@ -984,9 +1133,11 @@ if __name__ == '__main__':
 
         outputs += baseline_outputs
 
-    save_roc_curves(outputs)
-    save_ll_histograms(outputs)
-    save_llr_histograms(outputs)
+    if args.dataset != 'csv':
+        # write the outputs to a file
+        save_roc_curves(outputs)
+        save_ll_histograms(outputs)
+        save_llr_histograms(outputs)
 
     # move results folder from tmp_results/ to results/, making sure necessary directories exist
     new_folder = SAVE_FOLDER.replace("tmp_results", "results")

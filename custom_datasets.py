@@ -174,12 +174,10 @@ def load_raid(cache_dir, source, attack='none', train_ratio=0.8):
 
     return data_new['train']['text']
 
-def load_csv(label, cache_dir):
+def load_csv(cache_dir):
     # 从 csv 文件加载数据集
-    data = pd.read_csv('data/test_data.csv')
-    # 只保留Label为label的数据
-    data = data[data['label'] == label]
-    return data['text'].tolist()
+    data = pd.read_csv('data/test_data.csv', encoding='utf-8')
+    return data
 
 def load_german(cache_dir):
     return load_language('de', cache_dir)
